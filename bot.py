@@ -21,7 +21,14 @@ from memory import save_message, get_last_messages
 from reminders import add_reminder, get_due_reminders, mark_sent
 from knowledge import remember, get_knowledge, forget_item
 from tasks import add_task, get_open_tasks, close_task
-from clients import add_client, get_clients, find_clients, archive_client
+from clients import (
+    add_client,
+    get_clients,
+    find_clients,
+    archive_client,
+    update_client,
+    update_client_status,
+)
 from calendar_events import (
     add_event,
     get_events_for_day,
@@ -121,9 +128,10 @@ def format_clients(clients):
 
     text = "👥 Клиенты:\n\n"
 
-    for client_id, name, info, created_by in clients:
+    for client_id, name, info, created_by, status in clients:
         text += (
             f"{client_id}. {name}\n"
+            f"Статус: {status}\n"
             f"{info}\n"
             f"Добавила: {created_by}\n\n"
         )
@@ -478,6 +486,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += (
             "\n\nДобавить клиента:\n"
             "бот, новый клиент: Иван бюджет 18 млн семейная ипотека Коммунарка\n\n"
+            "Обновить клиента:\n"
+            "бот, обнови клиента 1: телефон +79999999999\n\n"
+            "Изменить статус:\n"
+            "бот, статус клиента 1: бронь\n\n"
             "Поиск:\n"
             "бот, найди клиента Иван\n\n"
             "Архив:\n"
@@ -587,7 +599,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Главное меню:", reply_markup=main_menu())
         return
 
-    # ПАМЯТЬ
     if clean_lower.startswith("запомни"):
         memory_text = re.sub(r"^запомни[:\s]*", "", clean_text, flags=re.IGNORECASE).strip()
         if not memory_text:
@@ -618,7 +629,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Удалила из памяти пункт {match.group()}")
         return
 
-    # ЗАДАЧИ
     if "покажи задачи" in clean_lower or "задачи команды" in clean_lower:
         await update.message.reply_text(format_tasks(get_open_tasks()))
         return
@@ -646,7 +656,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # КЛИЕНТЫ
     if clean_lower.startswith("новый клиент"):
         client_text = re.sub(
             r"^новый клиент[:\s]*",
@@ -670,6 +679,56 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(
             f"✅ Клиент добавлен:\n\n{name}"
+        )
+        return
+
+    if clean_lower.startswith("обнови клиента"):
+        match = re.search(r"обнови клиента\s+(\d+)", clean_lower)
+
+        if not match:
+            await update.message.reply_text(
+                "Пример:\nбот, обнови клиента 1: телефон +79999999999"
+            )
+            return
+
+        client_id = int(match.group(1))
+        parts = clean_text.split(":", 1)
+
+        if len(parts) < 2:
+            await update.message.reply_text(
+                "После номера клиента напиши двоеточие и новую информацию."
+            )
+            return
+
+        new_info = parts[1].strip()
+        update_client(client_id, new_info)
+
+        await update.message.reply_text(
+            f"✅ Клиент {client_id} обновлен"
+        )
+        return
+
+    if clean_lower.startswith("статус клиента"):
+        match = re.search(r"статус клиента\s+(\d+)", clean_lower)
+
+        if not match:
+            await update.message.reply_text(
+                "Пример:\nбот, статус клиента 1: бронь"
+            )
+            return
+
+        client_id = int(match.group(1))
+        parts = clean_text.split(":", 1)
+
+        if len(parts) < 2:
+            await update.message.reply_text("Не вижу новый статус.")
+            return
+
+        status = parts[1].strip()
+        update_client_status(client_id, status)
+
+        await update.message.reply_text(
+            f"✅ Статус клиента {client_id} изменен на:\n{status}"
         )
         return
 
@@ -707,7 +766,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # КАЛЕНДАРЬ
     if (
         "расписание" in clean_lower
         or "календарь" in clean_lower
@@ -757,7 +815,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # НАПОМИНАНИЯ
     if has_reminder_word:
         await update.message.chat.send_action("typing")
         reminder_result = await analyze_reminder_with_ai(user_text=user_text, sender=sender)
@@ -797,7 +854,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ОБЫЧНЫЙ ЧАТ + ИНТЕРНЕТ
     await update.message.chat.send_action("typing")
 
     try:
