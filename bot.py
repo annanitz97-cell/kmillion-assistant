@@ -1,5 +1,6 @@
 import os
 import aiohttp
+from datetime import datetime, timedelta
 
 from telegram import Update
 from telegram.ext import (
@@ -10,13 +11,15 @@ from telegram.ext import (
     filters,
 )
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
 from memory import save_message, get_last_messages
+from reminders import add_reminder, get_due_reminders, mark_sent
 
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 AITUNNEL_API_KEY = os.getenv("AITUNNEL_API_KEY")
 MODEL = os.getenv("MODEL", "gpt-4.1-mini")
-
 
 ANYA_ID = 274320100
 KATYA_ID = 135392354
@@ -39,21 +42,16 @@ async def ask_ai(message: str):
 Ты ассистент агентства недвижимости.
 
 В команде два партнера:
+- Анюся
+- Катерина
 
-Анюся
-Telegram ID: 274320100
+Важно:
+Ты не создаешь настоящие напоминания через обычный текст.
+Для настоящих напоминаний скажи использовать команду:
+/remind количество_минут текст
 
-Катерина
-Telegram ID: 135392354
-
-Твои задачи:
-
-- помогать по недвижимости
-- помогать с контентом
-- помогать с организацией работы
-- помогать с клиентами
-- помогать с маркетингом
-- помогать с задачами команды
+Пример:
+/remind 10 позвонить клиенту
 
 Отвечай кратко, понятно и по делу.
 """
@@ -62,12 +60,10 @@ Telegram ID: 135392354
 
     messages.extend(get_last_messages(100))
 
-    messages.append(
-        {
-            "role": "user",
-            "content": message
-        }
-    )
+    messages.append({
+        "role": "user",
+        "content": message
+    })
 
     payload = {
         "model": MODEL,
@@ -75,12 +71,7 @@ Telegram ID: 135392354
     }
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(
-            url,
-            headers=headers,
-            json=payload
-        ) as response:
-
+        async with session.post(url, headers=headers, json=payload) as response:
             data = await response.json()
 
             answer = data["choices"][0]["message"]["content"]
@@ -93,7 +84,10 @@ Telegram ID: 135392354
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Я KMillion Assistant 🚀"
+        "Привет! Я KMillion Assistant 🚀\n\n"
+        "Для напоминаний используй:\n"
+        "/remind 10 позвонить клиенту\n\n"
+        "10 — это количество минут."
     )
 
 
@@ -107,10 +101,66 @@ async def my_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def handle_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Формат такой:\n"
+            "/remind 10 позвонить клиенту\n\n"
+            "10 — количество минут."
+        )
+        return
+
+    try:
+        minutes = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text(
+            "Первым числом укажи количество минут.\n\n"
+            "Пример:\n"
+            "/remind 5 проверить ипотеку"
+        )
+        return
+
+    text = " ".join(context.args[1:])
+
+    remind_at = datetime.utcnow() + timedelta(minutes=minutes)
+
+    sender = "Анюся" if user.id == ANYA_ID else "Катерина" if user.id == KATYA_ID else user.first_name
+
+    reminder_text = f"{sender}: {text}"
+
+    add_reminder(
+        chat_id=chat_id,
+        text=reminder_text,
+        remind_at=remind_at.isoformat()
+    )
+
+    await update.message.reply_text(
+        f"✅ Напоминание создано.\n\n"
+        f"Через {minutes} мин:\n"
+        f"{text}"
+    )
+
+
+async def check_reminders(application: Application):
+    due_reminders = get_due_reminders()
+
+    for reminder_id, chat_id, text in due_reminders:
+        try:
+            await application.bot.send_message(
+                chat_id=chat_id,
+                text=f"🔔 Напоминание\n\n{text}"
+            )
+
+            mark_sent(reminder_id)
+
+        except Exception as e:
+            print(f"Ошибка отправки напоминания: {e}")
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_text = update.message.text
 
@@ -147,7 +197,6 @@ async def handle_message(
 
     try:
         answer = await ask_ai(full_prompt)
-
         await update.message.reply_text(answer)
 
     except Exception as e:
@@ -160,6 +209,7 @@ app = Application.builder().token(BOT_TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("id", my_id))
+app.add_handler(CommandHandler("remind", remind))
 
 app.add_handler(
     MessageHandler(
@@ -167,6 +217,15 @@ app.add_handler(
         handle_message
     )
 )
+
+scheduler = AsyncIOScheduler()
+scheduler.add_job(
+    check_reminders,
+    "interval",
+    seconds=30,
+    args=[app]
+)
+scheduler.start()
 
 print("KMillion Assistant запущен")
 
