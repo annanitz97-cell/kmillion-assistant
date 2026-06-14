@@ -25,9 +25,9 @@ from clients import (
     add_client,
     get_clients,
     find_clients,
+    get_client_by_id,
     archive_client,
-    update_client,
-    update_client_status,
+    update_client_fields,
 )
 from calendar_events import (
     add_event,
@@ -128,15 +128,33 @@ def format_clients(clients):
 
     text = "👥 Клиенты:\n\n"
 
-    for client_id, name, info, created_by, status in clients:
+    for client_id, name, phone, budget, mortgage, location, status, comment, created_by in clients:
         text += (
             f"{client_id}. {name}\n"
-            f"Статус: {status}\n"
-            f"{info}\n"
+            f"Телефон: {phone or '—'}\n"
+            f"Бюджет: {budget or '—'}\n"
+            f"Ипотека: {mortgage or '—'}\n"
+            f"Локация: {location or '—'}\n"
+            f"Статус: {status or 'active'}\n"
+            f"Комментарий: {comment or '—'}\n"
             f"Добавила: {created_by}\n\n"
         )
 
     return text.strip()
+
+
+def resolve_client_id(client_ref):
+    client_ref = client_ref.strip()
+
+    if client_ref.isdigit():
+        return int(client_ref)
+
+    found = find_clients(client_ref)
+
+    if not found:
+        return None
+
+    return found[0][0]
 
 
 async def tavily_search(query: str):
@@ -341,6 +359,72 @@ async def analyze_event_with_ai(user_text: str, sender: str):
                 return {"action": "none"}
 
 
+async def analyze_client_with_ai(user_text: str):
+    url = "https://api.aitunnel.ru/v1/chat/completions"
+
+    headers = {
+        "Authorization": f"Bearer {AITUNNEL_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    system_prompt = """
+Ты парсер клиентской карточки для Telegram CRM.
+
+Верни СТРОГО JSON без markdown.
+
+Если пользователь добавляет нового клиента:
+{
+  "action": "create_client",
+  "name": "Имя клиента",
+  "phone": "телефон или пусто",
+  "budget": "бюджет или пусто",
+  "mortgage": "тип ипотеки или пусто",
+  "location": "локация или пусто",
+  "status": "статус или active",
+  "comment": "прочая информация"
+}
+
+Если пользователь обновляет клиента:
+{
+  "action": "update_client",
+  "fields": {
+    "name": "",
+    "phone": "",
+    "budget": "",
+    "mortgage": "",
+    "location": "",
+    "status": "",
+    "comment": ""
+  }
+}
+
+Правила:
+- Понимай свободный текст.
+- Если поле не указано, оставь пустую строку.
+- Статусы могут быть: active, подбор, созвон, бронь, сделка, отказ, архив.
+- Не выдумывай данные.
+"""
+
+    payload = {
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text},
+        ],
+        "temperature": 0,
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=payload) as response:
+            data = await response.json()
+            raw = data["choices"][0]["message"]["content"]
+
+            try:
+                return json.loads(clean_json(raw))
+            except Exception:
+                return {"action": "none"}
+
+
 async def ask_ai(message: str):
     url = "https://api.aitunnel.ru/v1/chat/completions"
 
@@ -485,15 +569,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = format_clients(get_clients())
         text += (
             "\n\nДобавить клиента:\n"
-            "бот, новый клиент: Иван бюджет 18 млн семейная ипотека Коммунарка\n\n"
+            "бот, новый клиент:\n"
+            "Имя: Иван Иванов\n"
+            "Телефон: +79999999999\n"
+            "Бюджет: 18 млн\n"
+            "Ипотека: семейная\n"
+            "Локация: Коммунарка\n"
+            "Комментарий: хочет двушку\n\n"
             "Обновить клиента:\n"
-            "бот, обнови клиента 1: телефон +79999999999\n\n"
-            "Изменить статус:\n"
-            "бот, статус клиента 1: бронь\n\n"
+            "бот, обнови клиента Иван Иванов: бюджет 22 млн, статус: подготовка подборки\n\n"
+            "Показать карточку:\n"
+            "бот, покажи клиента Иван Иванов\n\n"
             "Поиск:\n"
             "бот, найди клиента Иван\n\n"
             "Архив:\n"
-            "бот, архив клиента 3"
+            "бот, архив клиента Иван Иванов"
         )
 
         await query.edit_message_text(
@@ -665,15 +755,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ).strip()
 
         if not client_text:
-            await update.message.reply_text("Не вижу данных клиента.")
+            await update.message.reply_text(
+                "Не вижу данных клиента.\n\n"
+                "Пример:\n"
+                "бот, новый клиент:\n"
+                "Имя: Иван Иванов\n"
+                "Телефон: +79999999999\n"
+                "Бюджет: 18 млн\n"
+                "Ипотека: семейная\n"
+                "Локация: Коммунарка\n"
+                "Комментарий: хочет двушку"
+            )
             return
 
-        first_line = client_text.split("\n")[0].strip()
-        name = first_line.split()[0] if first_line else "Без имени"
+        client_result = await analyze_client_with_ai(client_text)
+
+        if client_result.get("action") != "create_client":
+            await update.message.reply_text("Не смогла разобрать карточку клиента.")
+            return
+
+        name = client_result.get("name", "").strip()
+
+        if not name:
+            await update.message.reply_text("Не вижу имя клиента.")
+            return
 
         add_client(
             name=name,
-            info=client_text,
+            phone=client_result.get("phone", "").strip(),
+            budget=client_result.get("budget", "").strip(),
+            mortgage=client_result.get("mortgage", "").strip(),
+            location=client_result.get("location", "").strip(),
+            status=client_result.get("status", "active").strip() or "active",
+            comment=client_result.get("comment", "").strip(),
             created_by=sender
         )
 
@@ -683,25 +797,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if clean_lower.startswith("обнови клиента"):
-        match = re.search(r"обнови клиента\s+(\d+)", clean_lower)
-
-        if not match:
-            await update.message.reply_text(
-                "Пример:\nбот, обнови клиента 1: телефон +79999999999"
-            )
-            return
-
-        client_id = int(match.group(1))
         parts = clean_text.split(":", 1)
 
         if len(parts) < 2:
             await update.message.reply_text(
-                "После номера клиента напиши двоеточие и новую информацию."
+                "Напиши так:\n"
+                "бот, обнови клиента Иван Иванов: телефон +79999999999, статус: подготовка подборки"
             )
             return
 
-        new_info = parts[1].strip()
-        update_client(client_id, new_info)
+        left_part = parts[0]
+        update_text = parts[1].strip()
+
+        client_ref = re.sub(
+            r"^обнови клиента\s*",
+            "",
+            left_part,
+            flags=re.IGNORECASE
+        ).strip()
+
+        client_id = resolve_client_id(client_ref)
+
+        if not client_id:
+            await update.message.reply_text(
+                f"Не нашла клиента: {client_ref}"
+            )
+            return
+
+        update_result = await analyze_client_with_ai(update_text)
+
+        fields = update_result.get("fields", {})
+
+        if not fields:
+            fields = {"comment": update_text}
+
+        update_client_fields(client_id, fields)
 
         await update.message.reply_text(
             f"✅ Клиент {client_id} обновлен"
@@ -709,23 +839,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if clean_lower.startswith("статус клиента"):
-        match = re.search(r"статус клиента\s+(\d+)", clean_lower)
-
-        if not match:
-            await update.message.reply_text(
-                "Пример:\nбот, статус клиента 1: бронь"
-            )
-            return
-
-        client_id = int(match.group(1))
         parts = clean_text.split(":", 1)
 
         if len(parts) < 2:
-            await update.message.reply_text("Не вижу новый статус.")
+            await update.message.reply_text(
+                "Пример:\nбот, статус клиента Иван Иванов: бронь"
+            )
             return
 
+        left_part = parts[0]
         status = parts[1].strip()
-        update_client_status(client_id, status)
+
+        client_ref = re.sub(
+            r"^статус клиента\s*",
+            "",
+            left_part,
+            flags=re.IGNORECASE
+        ).strip()
+
+        client_id = resolve_client_id(client_ref)
+
+        if not client_id:
+            await update.message.reply_text(
+                f"Не нашла клиента: {client_ref}"
+            )
+            return
+
+        update_client_fields(client_id, {"status": status})
 
         await update.message.reply_text(
             f"✅ Статус клиента {client_id} изменен на:\n{status}"
@@ -753,16 +893,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if clean_lower.startswith("архив клиента"):
-        match = re.search(r"\d+", clean_lower)
+    if clean_lower.startswith("покажи клиента"):
+        client_ref = re.sub(
+            r"^покажи клиента[:\s]*",
+            "",
+            clean_text,
+            flags=re.IGNORECASE
+        ).strip()
 
-        if not match:
-            await update.message.reply_text("Укажи номер клиента. Например: бот, архив клиента 3")
+        client_id = resolve_client_id(client_ref)
+
+        if not client_id:
+            await update.message.reply_text(
+                f"Не нашла клиента: {client_ref}"
+            )
             return
 
-        archive_client(int(match.group()))
+        client = get_client_by_id(client_id)
+
+        if not client:
+            await update.message.reply_text("Клиент не найден.")
+            return
+
+        await update.message.reply_text(format_clients([client]))
+        return
+
+    if clean_lower.startswith("архив клиента"):
+        client_ref = re.sub(
+            r"^архив клиента\s*",
+            "",
+            clean_text,
+            flags=re.IGNORECASE
+        ).strip()
+
+        client_id = resolve_client_id(client_ref)
+
+        if not client_id:
+            await update.message.reply_text(
+                f"Не нашла клиента: {client_ref}"
+            )
+            return
+
+        archive_client(client_id)
+
         await update.message.reply_text(
-            f"✅ Клиент {match.group()} отправлен в архив"
+            f"✅ Клиент {client_id} отправлен в архив"
         )
         return
 
@@ -925,3 +1100,7 @@ scheduler.start()
 print("KMillion Assistant запущен")
 
 app.run_polling()
+     
+
+         
+     
