@@ -18,6 +18,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from memory import save_message, get_last_messages
 from reminders import add_reminder, get_due_reminders, mark_sent
+from knowledge import remember, get_knowledge, forget_item
+from tasks import add_task, get_open_tasks, close_task
 
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -71,33 +73,11 @@ async def should_use_web(user_text: str):
     text = user_text.lower()
 
     keywords = [
-        "погода",
-        "сейчас",
-        "сегодня",
-        "новости",
-        "курс",
-        "доллар",
-        "евро",
-        "ставка",
-        "цб",
-        "ключевая",
-        "кто выиграл",
-        "результат",
-        "матч",
-        "свежие",
-        "новые",
-        "новинка",
-        "вышли",
-        "2026",
-        "2027",
-        "цена",
-        "стоимость",
-        "актуально",
-        "последние",
-        "последний",
-        "найди",
-        "поищи",
-        "проверь",
+        "погода", "сейчас", "сегодня", "новости", "курс", "доллар", "евро",
+        "ставка", "цб", "ключевая", "кто выиграл", "результат", "матч",
+        "свежие", "новые", "новинка", "вышли", "2026", "2027",
+        "цена", "стоимость", "актуально", "последние", "последний",
+        "найди", "поищи", "проверь"
     ]
 
     return any(word in text for word in keywords)
@@ -105,7 +85,6 @@ async def should_use_web(user_text: str):
 
 async def analyze_reminder_with_ai(user_text: str, sender: str):
     url = "https://api.aitunnel.ru/v1/chat/completions"
-
     now_moscow = datetime.now(MOSCOW_TZ)
     now_text = now_moscow.strftime("%Y-%m-%d %H:%M")
 
@@ -120,11 +99,9 @@ async def analyze_reminder_with_ai(user_text: str, sender: str):
 Текущая дата и время по Москве: {now_text}.
 Таймзона: Europe/Moscow.
 
-Тебе нужно понять, является ли сообщение просьбой создать напоминание.
+Верни СТРОГО JSON без markdown и пояснений.
 
-Верни СТРОГО JSON без markdown и без пояснений.
-
-Формат ответа, если это напоминание:
+Если это напоминание:
 {{
   "action": "create_reminder",
   "text": "что именно напомнить",
@@ -132,7 +109,7 @@ async def analyze_reminder_with_ai(user_text: str, sender: str):
   "human_time": "человеческое описание времени"
 }}
 
-Формат ответа, если это НЕ напоминание:
+Если это НЕ напоминание:
 {{
   "action": "none"
 }}
@@ -140,36 +117,72 @@ async def analyze_reminder_with_ai(user_text: str, sender: str):
 Правила:
 - Понимай любые формулировки со словом "напомни", "напоминание", "поставь напоминание".
 - Порядок слов может быть любым.
-- Понимай такие варианты:
-  "напомни через 5 минут позвонить клиенту"
-  "через 5 минут напомни позвонить клиенту"
-  "бот, напомни Кате позвонить мне через 1 минуту"
-  "Кате напомни через час отправить договор"
-  "напомни завтра в 10:00 проверить ипотеку"
-  "завтра в 10 напомни проверить ипотеку"
-  "напомни в понедельник в 12:00 проверить задачу"
-  "напомни 25.06 в 15:00 отправить договор"
-- Понимай: через 5 минут, через 2 часа, через день, через неделю, сегодня, завтра, послезавтра, дни недели, даты формата 25.06 и 25.06.2026.
+- Понимай: через 5 минут, через 2 часа, через день, через неделю, сегодня, завтра, послезавтра, дни недели, 25.06, 25.06.2026.
 - Если год не указан, используй ближайшую будущую дату.
 - Если указано "Кате", "Катерине", "Анюсе", включи это в текст напоминания.
 - Если время не указано вообще, верни action none.
 - Если дата/время уже прошли, выбери ближайшую будущую дату.
-- Не обещай ничего. Только JSON.
 
-Отправитель сообщения: {sender}.
+Отправитель: {sender}.
 """
 
     payload = {
         "model": MODEL,
         "messages": [
-            {
-                "role": "system",
-                "content": system_prompt,
-            },
-            {
-                "role": "user",
-                "content": user_text,
-            },
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text},
+        ],
+        "temperature": 0,
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=payload) as response:
+            data = await response.json()
+            raw = data["choices"][0]["message"]["content"]
+            cleaned = clean_json(raw)
+
+            try:
+                return json.loads(cleaned)
+            except Exception:
+                return {"action": "none"}
+
+
+async def analyze_task_with_ai(user_text: str, sender: str):
+    url = "https://api.aitunnel.ru/v1/chat/completions"
+
+    headers = {
+        "Authorization": f"Bearer {AITUNNEL_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    system_prompt = f"""
+Ты парсер задач для Telegram-бота.
+
+Верни СТРОГО JSON без markdown и пояснений.
+
+Если пользователь хочет создать задачу:
+{{
+  "action": "create_task",
+  "person": "Анюся или Катерина или Команда",
+  "task": "текст задачи"
+}}
+
+Если это не создание задачи:
+{{
+  "action": "none"
+}}
+
+Правила:
+- Понимай формулировки: "задача Катерине", "поставь задачу Анюсе", "надо сделать", "Катерине: проверить договор".
+- Если исполнитель не указан, ставь "Команда".
+- Отправитель: {sender}.
+"""
+
+    payload = {
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text},
         ],
         "temperature": 0,
     }
@@ -194,49 +207,36 @@ async def ask_ai(message: str):
         "Content-Type": "application/json",
     }
 
+    knowledge_items = get_knowledge()
+    knowledge_text = "\n".join([f"{item_id}. {text}" for item_id, text in knowledge_items])
+
     messages = [
         {
             "role": "system",
-            "content": """
+            "content": f"""
 Ты KMillion Assistant.
 
 Ты универсальный личный и командный ассистент Анюси и Катерины.
 
-Ты можешь помогать с любыми бытовыми и рабочими задачами:
-- недвижимость
-- клиенты
-- контент
-- маркетинг
-- тексты
-- идеи
-- планирование
-- кино и книги
-- здоровье и самочувствие
-- обучение
-- бытовые вопросы
-- финансы на уровне общих объяснений
-- путешествия
-- технологии
-- любые повседневные вопросы
+Ты помогаешь с любыми бытовыми и рабочими задачами:
+недвижимость, клиенты, контент, маркетинг, тексты, идеи, планирование, кино, книги,
+здоровье, обучение, бытовые вопросы, финансы, путешествия, технологии.
 
-Важные правила:
+Долговременная память команды:
+{knowledge_text if knowledge_text else "Пока пусто."}
+
+Правила:
 - Не ограничивайся недвижимостью.
 - Если в сообщении есть свежие данные из интернета, используй их.
-- Если вопрос про здоровье, не ставь диагноз. Дай аккуратное объяснение, признаки риска и рекомендацию обратиться к врачу, если есть тревожные симптомы.
+- Если вопрос про здоровье, не ставь диагноз.
 - Не выдумывай факты.
-- Если не хватает данных, честно скажи, чего не хватает.
-- Если пользователь просит напомнить, не просто обещай. Напоминания создает технический модуль бота.
 - Отвечай понятно, живо и по делу.
 """
         }
     ]
 
     messages.extend(get_last_messages(100))
-
-    messages.append({
-        "role": "user",
-        "content": message
-    })
+    messages.append({"role": "user", "content": message})
 
     payload = {
         "model": MODEL,
@@ -246,7 +246,6 @@ async def ask_ai(message: str):
     async with aiohttp.ClientSession() as session:
         async with session.post(url, headers=headers, json=payload) as response:
             data = await response.json()
-
             answer = data["choices"][0]["message"]["content"]
 
             save_message("team", "user", message)
@@ -258,18 +257,19 @@ async def ask_ai(message: str):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет! Я KMillion Assistant 🚀\n\n"
-        "Я универсальный ассистент: интернет-поиск, задачи, напоминания, тексты, идеи, быт, кино, здоровье, работа и не только.\n\n"
-        "Напоминания можно писать обычным языком:\n"
-        "• напомни через 15 минут позвонить клиенту\n"
-        "• через 1 минуту напомни мне отправить договор\n"
-        "• бот, напомни Кате через час отправить договор\n"
-        "• напомни завтра в 10:00 проверить ипотеку"
+        "Умею: интернет-поиск, напоминания, память, задачи, тексты, идеи, быт, кино, здоровье и работу.\n\n"
+        "Примеры:\n"
+        "бот, запомни: Катерина отвечает за ипотеку\n"
+        "бот, что ты помнишь?\n"
+        "бот, задача Катерине: проверить ДДУ\n"
+        "бот, покажи задачи\n"
+        "бот, закрой задачу 3\n"
+        "напомни завтра в 10:00 позвонить клиенту"
     )
 
 
 async def my_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-
     await update.message.reply_text(
         f"👤 Имя: {user.first_name}\n"
         f"🆔 ID: {user.id}\n"
@@ -282,26 +282,17 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
     if len(context.args) < 2:
-        await update.message.reply_text(
-            "Формат такой:\n"
-            "/remind 10 позвонить клиенту\n\n"
-            "10 — количество минут."
-        )
+        await update.message.reply_text("Формат: /remind 10 позвонить клиенту")
         return
 
     try:
         minutes = int(context.args[0])
     except ValueError:
-        await update.message.reply_text(
-            "Первым числом укажи количество минут.\n\n"
-            "Пример:\n"
-            "/remind 5 проверить ипотеку"
-        )
+        await update.message.reply_text("Первым числом укажи количество минут.")
         return
 
     text = " ".join(context.args[1:])
     remind_at = datetime.utcnow() + timedelta(minutes=minutes)
-
     sender = get_sender_name(user)
 
     add_reminder(
@@ -311,9 +302,7 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(
-        f"✅ Напоминание создано.\n\n"
-        f"Через {minutes} мин:\n"
-        f"{text}"
+        f"✅ Напоминание создано.\n\nЧерез {minutes} мин:\n{text}"
     )
 
 
@@ -326,11 +315,22 @@ async def check_reminders(application: Application):
                 chat_id=chat_id,
                 text=f"🔔 Напоминание\n\n{text}"
             )
-
             mark_sent(reminder_id)
 
         except Exception as e:
             print(f"Ошибка отправки напоминания: {e}")
+
+
+def format_tasks(tasks):
+    if not tasks:
+        return "Открытых задач пока нет."
+
+    text = "📌 Открытые задачи:\n\n"
+
+    for task_id, person, task in tasks:
+        text += f"{task_id}. {person}: {task}\n"
+
+    return text
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -342,15 +342,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender = get_sender_name(user)
 
     is_reply_to_bot = False
-
     if update.message.reply_to_message:
         if update.message.reply_to_message.from_user.id == context.bot.id:
             is_reply_to_bot = True
 
-    has_reminder_word = (
-        "напомни" in text_lower
-        or "напоминание" in text_lower
-    )
+    has_reminder_word = "напомни" in text_lower or "напоминание" in text_lower
 
     trigger = (
         text_lower.startswith("бот")
@@ -362,6 +358,80 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not trigger:
         return
 
+    clean_text = re.sub(r"^(бот|ассистент)[,\s]+", "", user_text, flags=re.IGNORECASE).strip()
+    clean_lower = clean_text.lower()
+
+    # ДОЛГОВРЕМЕННАЯ ПАМЯТЬ
+    if clean_lower.startswith("запомни"):
+        memory_text = re.sub(r"^запомни[:\s]*", "", clean_text, flags=re.IGNORECASE).strip()
+
+        if not memory_text:
+            await update.message.reply_text("Что именно запомнить?")
+            return
+
+        remember(memory_text)
+        await update.message.reply_text(f"✅ Запомнила:\n{memory_text}")
+        return
+
+    if "что ты помнишь" in clean_lower or "покажи память" in clean_lower:
+        items = get_knowledge()
+
+        if not items:
+            await update.message.reply_text("Память пока пустая.")
+            return
+
+        text = "🧠 Я помню:\n\n"
+        for item_id, item_text in items:
+            text += f"{item_id}. {item_text}\n"
+
+        await update.message.reply_text(text)
+        return
+
+    if clean_lower.startswith("забудь"):
+        match = re.search(r"\d+", clean_lower)
+
+        if not match:
+            await update.message.reply_text("Напиши номер, который нужно забыть. Например: бот, забудь 3")
+            return
+
+        forget_item(int(match.group()))
+        await update.message.reply_text(f"✅ Удалила из памяти пункт {match.group()}")
+        return
+
+    # ЗАДАЧИ
+    if "покажи задачи" in clean_lower or "задачи команды" in clean_lower:
+        await update.message.reply_text(format_tasks(get_open_tasks()))
+        return
+
+    if clean_lower.startswith("закрой задачу"):
+        match = re.search(r"\d+", clean_lower)
+
+        if not match:
+            await update.message.reply_text("Укажи номер задачи. Например: бот, закрой задачу 3")
+            return
+
+        close_task(int(match.group()))
+        await update.message.reply_text(f"✅ Задача {match.group()} закрыта")
+        return
+
+    if "задача" in clean_lower or "поставь задачу" in clean_lower:
+        task_result = await analyze_task_with_ai(clean_text, sender)
+
+        if task_result.get("action") == "create_task":
+            person = task_result.get("person", "Команда")
+            task = task_result.get("task", "").strip()
+
+            if not task:
+                await update.message.reply_text("Я поняла, что это задача, но не вижу текст задачи.")
+                return
+
+            add_task(person, task)
+            await update.message.reply_text(
+                f"✅ Задача создана.\n\nИсполнитель: {person}\nЗадача: {task}"
+            )
+            return
+
+    # НАПОМИНАНИЯ
     if has_reminder_word:
         await update.message.chat.send_action("typing")
 
@@ -392,28 +462,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
                 await update.message.reply_text(
-                    f"✅ Напоминание создано.\n\n"
-                    f"{human_time}:\n"
-                    f"{reminder_text}"
+                    f"✅ Напоминание создано.\n\n{human_time}:\n{reminder_text}"
                 )
-
                 return
 
             except Exception as e:
-                await update.message.reply_text(
-                    f"Не смогла создать напоминание. Ошибка: {str(e)}"
-                )
+                await update.message.reply_text(f"Не смогла создать напоминание. Ошибка: {str(e)}")
                 return
 
         await update.message.reply_text(
             "Я поняла, что нужно напоминание, но не вижу точного времени.\n\n"
-            "Напиши, например:\n"
-            "напомни через 15 минут позвонить клиенту\n"
-            "или\n"
-            "напомни завтра в 10:00 проверить ипотеку"
+            "Например: напомни завтра в 10:00 позвонить клиенту"
         )
         return
 
+    # ОБЫЧНЫЙ ЧАТ + ИНТЕРНЕТ
     await update.message.chat.send_action("typing")
 
     try:
@@ -441,8 +504,7 @@ URL: {item.get('url', '')}
 Свежие данные из интернета:
 {web_context}
 
-Ответь на вопрос пользователя на русском языке.
-Если вопрос про погоду, дай практичный совет, что надеть.
+Ответь на русском языке.
 Если источники противоречат друг другу, скажи об этом.
 """
 
@@ -458,9 +520,7 @@ URL: {item.get('url', '')}
         await update.message.reply_text(answer)
 
     except Exception as e:
-        await update.message.reply_text(
-            f"Ошибка: {str(e)}"
-        )
+        await update.message.reply_text(f"Ошибка: {str(e)}")
 
 
 app = Application.builder().token(BOT_TOKEN).build()
