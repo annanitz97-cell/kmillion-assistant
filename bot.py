@@ -22,6 +22,7 @@ from reminders import add_reminder, get_due_reminders, mark_sent
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 AITUNNEL_API_KEY = os.getenv("AITUNNEL_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 MODEL = os.getenv("MODEL", "gpt-4.1-mini")
 
 ANYA_ID = 274320100
@@ -48,6 +49,58 @@ def clean_json(text: str):
     text = re.sub(r"^```", "", text).strip()
     text = re.sub(r"```$", "", text).strip()
     return text
+
+
+async def tavily_search(query: str):
+    url = "https://api.tavily.com/search"
+
+    payload = {
+        "api_key": TAVILY_API_KEY,
+        "query": query,
+        "search_depth": "basic",
+        "max_results": 5,
+        "include_answer": True,
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload) as response:
+            return await response.json()
+
+
+async def should_use_web(user_text: str):
+    text = user_text.lower()
+
+    keywords = [
+        "погода",
+        "сейчас",
+        "сегодня",
+        "новости",
+        "курс",
+        "доллар",
+        "евро",
+        "ставка",
+        "цб",
+        "ключевая",
+        "кто выиграл",
+        "результат",
+        "матч",
+        "свежие",
+        "новые",
+        "новинка",
+        "вышли",
+        "2026",
+        "2027",
+        "цена",
+        "стоимость",
+        "актуально",
+        "последние",
+        "последний",
+        "найди",
+        "поищи",
+        "проверь",
+    ]
+
+    return any(word in text for word in keywords)
 
 
 async def analyze_reminder_with_ai(user_text: str, sender: str):
@@ -168,10 +221,11 @@ async def ask_ai(message: str):
 
 Важные правила:
 - Не ограничивайся недвижимостью.
+- Если в сообщении есть свежие данные из интернета, используй их.
 - Если вопрос про здоровье, не ставь диагноз. Дай аккуратное объяснение, признаки риска и рекомендацию обратиться к врачу, если есть тревожные симптомы.
-- Если вопрос требует актуальных данных, например погода, курс валют, новости, свежие цены, честно скажи, что у тебя в Telegram-боте нет прямого доступа к интернету, если такая интеграция еще не подключена.
 - Не выдумывай факты.
-- Если пользователь просит напомнить, не просто обещай. Напоминания создает технический модуль бота. Если модуль не сработал, попроси указать точное время.
+- Если не хватает данных, честно скажи, чего не хватает.
+- Если пользователь просит напомнить, не просто обещай. Напоминания создает технический модуль бота.
 - Отвечай понятно, живо и по делу.
 """
         }
@@ -204,14 +258,12 @@ async def ask_ai(message: str):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет! Я KMillion Assistant 🚀\n\n"
-        "Я универсальный ассистент: задачи, напоминания, тексты, идеи, быт, кино, здоровье, работа и не только.\n\n"
+        "Я универсальный ассистент: интернет-поиск, задачи, напоминания, тексты, идеи, быт, кино, здоровье, работа и не только.\n\n"
         "Напоминания можно писать обычным языком:\n"
         "• напомни через 15 минут позвонить клиенту\n"
         "• через 1 минуту напомни мне отправить договор\n"
         "• бот, напомни Кате через час отправить договор\n"
-        "• напомни завтра в 10:00 проверить ипотеку\n\n"
-        "Старый формат тоже работает:\n"
-        "/remind 10 позвонить клиенту"
+        "• напомни завтра в 10:00 проверить ипотеку"
     )
 
 
@@ -362,16 +414,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    full_prompt = f"""
+    await update.message.chat.send_action("typing")
+
+    try:
+        if await should_use_web(user_text):
+            search_data = await tavily_search(user_text)
+
+            web_context = ""
+
+            if search_data.get("answer"):
+                web_context += f"\nКраткий ответ Tavily:\n{search_data.get('answer')}\n"
+
+            for item in search_data.get("results", [])[:5]:
+                web_context += f"""
+Источник: {item.get('title', '')}
+URL: {item.get('url', '')}
+Фрагмент: {item.get('content', '')}
+"""
+
+            full_prompt = f"""
+Сообщение от: {sender}
+
+Пользователь спросил:
+{user_text}
+
+Свежие данные из интернета:
+{web_context}
+
+Ответь на вопрос пользователя на русском языке.
+Если вопрос про погоду, дай практичный совет, что надеть.
+Если источники противоречат друг другу, скажи об этом.
+"""
+
+        else:
+            full_prompt = f"""
 Сообщение от: {sender}
 
 Текст сообщения:
 {user_text}
 """
 
-    await update.message.chat.send_action("typing")
-
-    try:
         answer = await ask_ai(full_prompt)
         await update.message.reply_text(answer)
 
