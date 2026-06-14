@@ -30,13 +30,15 @@ async def ask_ai(message: str):
                 "content": """
 Ты KMillion Assistant.
 
-Ты помогаешь двум партнерам агентства недвижимости.
+Ты помогаешь двум партнерам агентства недвижимости:
+- Анюсе
+- Катерине
 
 Твои задачи:
-- отвечать на вопросы
 - помогать с недвижимостью
 - помогать с контентом
 - помогать с организацией работы
+- помогать с клиентами
 - давать краткие и понятные ответы
 """
             },
@@ -65,6 +67,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def my_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    await update.message.reply_text(
+        f"👤 Имя: {user.first_name}\n"
+        f"🆔 ID: {user.id}\n"
+        f"📎 Username: @{user.username if user.username else 'нет'}"
+    )
+
+
 async def handle_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -87,6 +99,8 @@ async def handle_message(
 app = Application.builder().token(BOT_TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("id", my_id))
+
 app.add_handler(
     MessageHandler(
         filters.TEXT & ~filters.COMMAND,
