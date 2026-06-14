@@ -1,4 +1,5 @@
 import os
+import re
 import aiohttp
 from datetime import datetime, timedelta
 
@@ -25,6 +26,45 @@ ANYA_ID = 274320100
 KATYA_ID = 135392354
 
 
+def get_sender_name(user):
+    if user.id == ANYA_ID:
+        return "Анюся"
+    if user.id == KATYA_ID:
+        return "Катерина"
+    return user.first_name
+
+
+def parse_natural_reminder(text: str):
+    text = text.strip()
+
+    # Убираем обращение к боту, если оно есть
+    text = re.sub(r"^(бот|ассистент)[,\s]+", "", text, flags=re.IGNORECASE)
+
+    pattern = r"^напомни\s+через\s+(\d+)\s*(мин|минут|минуту|минуты|час|часа|часов)\s+(.+)$"
+
+    match = re.match(pattern, text, flags=re.IGNORECASE)
+
+    if not match:
+        return None
+
+    amount = int(match.group(1))
+    unit = match.group(2).lower()
+    reminder_text = match.group(3).strip()
+
+    if unit.startswith("мин"):
+        remind_at = datetime.utcnow() + timedelta(minutes=amount)
+        human_time = f"через {amount} мин."
+
+    elif unit.startswith("час"):
+        remind_at = datetime.utcnow() + timedelta(hours=amount)
+        human_time = f"через {amount} ч."
+
+    else:
+        return None
+
+    return reminder_text, remind_at, human_time
+
+
 async def ask_ai(message: str):
     url = "https://api.aitunnel.ru/v1/chat/completions"
 
@@ -46,12 +86,11 @@ async def ask_ai(message: str):
 - Катерина
 
 Важно:
-Ты не создаешь настоящие напоминания через обычный текст.
-Для настоящих напоминаний скажи использовать команду:
-/remind количество_минут текст
-
-Пример:
-/remind 10 позвонить клиенту
+Если пользователь просит напомнить, но пишет это обычным языком,
+бот сам создает напоминание, если фраза в формате:
+"напомни через 15 мин позвонить клиенту"
+или
+"напомни через 2 часа отправить договор".
 
 Отвечай кратко, понятно и по делу.
 """
@@ -85,9 +124,10 @@ async def ask_ai(message: str):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет! Я KMillion Assistant 🚀\n\n"
-        "Для напоминаний используй:\n"
-        "/remind 10 позвонить клиенту\n\n"
-        "10 — это количество минут."
+        "Теперь можно писать так:\n"
+        "напомни через 15 мин позвонить Кате\n\n"
+        "Или старым способом:\n"
+        "/remind 10 позвонить клиенту"
     )
 
 
@@ -124,11 +164,9 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = " ".join(context.args[1:])
-
     remind_at = datetime.utcnow() + timedelta(minutes=minutes)
 
-    sender = "Анюся" if user.id == ANYA_ID else "Катерина" if user.id == KATYA_ID else user.first_name
-
+    sender = get_sender_name(user)
     reminder_text = f"{sender}: {text}"
 
     add_reminder(
@@ -163,9 +201,33 @@ async def check_reminders(application: Application):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_text = update.message.text
+    chat_id = update.effective_chat.id
 
-    text_lower = user_text.lower()
+    text_lower = user_text.lower().strip()
 
+    # 1. Сначала проверяем естественные напоминания
+    reminder = parse_natural_reminder(user_text)
+
+    if reminder:
+        reminder_text, remind_at, human_time = reminder
+
+        sender = get_sender_name(user)
+
+        add_reminder(
+            chat_id=chat_id,
+            text=f"{sender}: {reminder_text}",
+            remind_at=remind_at.isoformat()
+        )
+
+        await update.message.reply_text(
+            f"✅ Напоминание создано.\n\n"
+            f"{human_time}:\n"
+            f"{reminder_text}"
+        )
+
+        return
+
+    # 2. Потом обычный фильтр обращения к боту
     trigger = (
         text_lower.startswith("бот")
         or text_lower.startswith("ассистент")
@@ -178,13 +240,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not trigger:
         return
 
-    sender = "Неизвестный пользователь"
-
-    if user.id == ANYA_ID:
-        sender = "Анюся"
-
-    elif user.id == KATYA_ID:
-        sender = "Катерина"
+    sender = get_sender_name(user)
 
     full_prompt = f"""
 Сообщение от: {sender}
