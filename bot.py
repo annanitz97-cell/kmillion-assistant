@@ -13,6 +13,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 AITUNNEL_API_KEY = os.getenv("AITUNNEL_API_KEY")
 MODEL = os.getenv("MODEL", "gpt-4.1-mini")
 
+# Telegram ID участников
+ANYA_ID = 274320100
+KATYA_ID = 135392354
+
 
 async def ask_ai(message: str):
     url = "https://api.aitunnel.ru/v1/chat/completions"
@@ -30,16 +34,26 @@ async def ask_ai(message: str):
                 "content": """
 Ты KMillion Assistant.
 
-Ты помогаешь двум партнерам агентства недвижимости:
-- Анюсе
-- Катерине
+Ты ассистент агентства недвижимости.
+
+В команде два партнера:
+
+Анюся
+Telegram ID: 274320100
+
+Катерина
+Telegram ID: 135392354
 
 Твои задачи:
-- помогать с недвижимостью
+
+- помогать по недвижимости
 - помогать с контентом
 - помогать с организацией работы
 - помогать с клиентами
-- давать краткие и понятные ответы
+- помогать с маркетингом
+- помогать с задачами команды
+
+Отвечай кратко, понятно и по делу.
 """
             },
             {
@@ -81,12 +95,28 @@ async def handle_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+    user = update.effective_user
     user_text = update.message.text
+
+    sender = "Неизвестный пользователь"
+
+    if user.id == ANYA_ID:
+        sender = "Анюся"
+
+    elif user.id == KATYA_ID:
+        sender = "Катерина"
+
+    full_prompt = f"""
+Сообщение от: {sender}
+
+Текст сообщения:
+{user_text}
+"""
 
     await update.message.chat.send_action("typing")
 
     try:
-        answer = await ask_ai(user_text)
+        answer = await ask_ai(full_prompt)
 
         await update.message.reply_text(answer)
 
@@ -107,5 +137,7 @@ app.add_handler(
         handle_message
     )
 )
+
+print("KMillion Assistant запущен")
 
 app.run_polling()
