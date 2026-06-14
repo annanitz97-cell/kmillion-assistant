@@ -1,5 +1,6 @@
 import os
 import aiohttp
+
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -9,11 +10,14 @@ from telegram.ext import (
     filters,
 )
 
+from memory import save_message, get_last_messages
+
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 AITUNNEL_API_KEY = os.getenv("AITUNNEL_API_KEY")
 MODEL = os.getenv("MODEL", "gpt-4.1-mini")
 
-# Telegram ID участников
+
 ANYA_ID = 274320100
 KATYA_ID = 135392354
 
@@ -26,12 +30,10 @@ async def ask_ai(message: str):
         "Content-Type": "application/json",
     }
 
-    payload = {
-        "model": MODEL,
-        "messages": [
-            {
-                "role": "system",
-                "content": """
+    messages = [
+        {
+            "role": "system",
+            "content": """
 Ты KMillion Assistant.
 
 Ты ассистент агентства недвижимости.
@@ -55,12 +57,21 @@ Telegram ID: 135392354
 
 Отвечай кратко, понятно и по делу.
 """
-            },
-            {
-                "role": "user",
-                "content": message
-            }
-        ]
+        }
+    ]
+
+    messages.extend(get_last_messages(100))
+
+    messages.append(
+        {
+            "role": "user",
+            "content": message
+        }
+    )
+
+    payload = {
+        "model": MODEL,
+        "messages": messages
     }
 
     async with aiohttp.ClientSession() as session:
@@ -72,7 +83,12 @@ Telegram ID: 135392354
 
             data = await response.json()
 
-            return data["choices"][0]["message"]["content"]
+            answer = data["choices"][0]["message"]["content"]
+
+            save_message("team", "user", message)
+            save_message("team", "assistant", answer)
+
+            return answer
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -97,6 +113,20 @@ async def handle_message(
 ):
     user = update.effective_user
     user_text = update.message.text
+
+    text_lower = user_text.lower()
+
+    trigger = (
+        text_lower.startswith("бот")
+        or text_lower.startswith("ассистент")
+    )
+
+    if update.message.reply_to_message:
+        if update.message.reply_to_message.from_user.id == context.bot.id:
+            trigger = True
+
+    if not trigger:
+        return
 
     sender = "Неизвестный пользователь"
 
