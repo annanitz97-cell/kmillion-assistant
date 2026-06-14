@@ -21,6 +21,7 @@ from memory import save_message, get_last_messages
 from reminders import add_reminder, get_due_reminders, mark_sent
 from knowledge import remember, get_knowledge, forget_item
 from tasks import add_task, get_open_tasks, close_task
+from clients import add_client, get_clients, find_clients, archive_client
 from calendar_events import (
     add_event,
     get_events_for_day,
@@ -112,6 +113,22 @@ def format_tasks(tasks):
     for task_id, person, task in tasks:
         text += f"{task_id}. {person}: {task}\n"
     return text
+
+
+def format_clients(clients):
+    if not clients:
+        return "👥 Клиентов пока нет."
+
+    text = "👥 Клиенты:\n\n"
+
+    for client_id, name, info, created_by in clients:
+        text += (
+            f"{client_id}. {name}\n"
+            f"{info}\n"
+            f"Добавила: {created_by}\n\n"
+        )
+
+    return text.strip()
 
 
 async def tavily_search(query: str):
@@ -457,8 +474,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "clients":
+        text = format_clients(get_clients())
+        text += (
+            "\n\nДобавить клиента:\n"
+            "бот, новый клиент: Иван бюджет 18 млн семейная ипотека Коммунарка\n\n"
+            "Поиск:\n"
+            "бот, найди клиента Иван\n\n"
+            "Архив:\n"
+            "бот, архив клиента 3"
+        )
+
         await query.edit_message_text(
-            "👥 Клиенты пока следующий блок.\n\nСначала сделали меню и календарь. Следующим шагом добавим карточки клиентов.",
+            text,
             reply_markup=main_menu()
         )
         return
@@ -618,6 +645,67 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✅ Задача создана.\n\nИсполнитель: {person}\nЗадача: {task}"
             )
             return
+
+    # КЛИЕНТЫ
+    if clean_lower.startswith("новый клиент"):
+        client_text = re.sub(
+            r"^новый клиент[:\s]*",
+            "",
+            clean_text,
+            flags=re.IGNORECASE
+        ).strip()
+
+        if not client_text:
+            await update.message.reply_text("Не вижу данных клиента.")
+            return
+
+        first_line = client_text.split("\n")[0].strip()
+        name = first_line.split()[0] if first_line else "Без имени"
+
+        add_client(
+            name=name,
+            info=client_text,
+            created_by=sender
+        )
+
+        await update.message.reply_text(
+            f"✅ Клиент добавлен:\n\n{name}"
+        )
+        return
+
+    if "покажи клиентов" in clean_lower or clean_lower == "клиенты":
+        await update.message.reply_text(format_clients(get_clients()))
+        return
+
+    if clean_lower.startswith("найди клиента"):
+        search_text = re.sub(
+            r"^найди клиента[:\s]*",
+            "",
+            clean_text,
+            flags=re.IGNORECASE
+        ).strip()
+
+        if not search_text:
+            await update.message.reply_text("Кого ищем?")
+            return
+
+        await update.message.reply_text(
+            format_clients(find_clients(search_text))
+        )
+        return
+
+    if clean_lower.startswith("архив клиента"):
+        match = re.search(r"\d+", clean_lower)
+
+        if not match:
+            await update.message.reply_text("Укажи номер клиента. Например: бот, архив клиента 3")
+            return
+
+        archive_client(int(match.group()))
+        await update.message.reply_text(
+            f"✅ Клиент {match.group()} отправлен в архив"
+        )
+        return
 
     # КАЛЕНДАРЬ
     if (
