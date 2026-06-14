@@ -1,7 +1,9 @@
 import os
 import re
+import json
 import aiohttp
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from telegram import Update
 from telegram.ext import (
@@ -25,6 +27,8 @@ MODEL = os.getenv("MODEL", "gpt-4.1-mini")
 ANYA_ID = 274320100
 KATYA_ID = 135392354
 
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+
 
 def get_sender_name(user):
     if user.id == ANYA_ID:
@@ -34,35 +38,99 @@ def get_sender_name(user):
     return user.first_name
 
 
-def parse_natural_reminder(text: str):
+def to_utc_naive(dt_moscow):
+    return dt_moscow.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+
+
+def clean_json(text: str):
     text = text.strip()
+    text = re.sub(r"^```json", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"^```", "", text).strip()
+    text = re.sub(r"```$", "", text).strip()
+    return text
 
-    # Убираем обращение к боту, если оно есть
-    text = re.sub(r"^(бот|ассистент)[,\s]+", "", text, flags=re.IGNORECASE)
 
-    pattern = r"^напомни\s+через\s+(\d+)\s*(мин|минут|минуту|минуты|час|часа|часов)\s+(.+)$"
+async def analyze_reminder_with_ai(user_text: str, sender: str):
+    url = "https://api.aitunnel.ru/v1/chat/completions"
 
-    match = re.match(pattern, text, flags=re.IGNORECASE)
+    now_moscow = datetime.now(MOSCOW_TZ)
+    now_text = now_moscow.strftime("%Y-%m-%d %H:%M")
 
-    if not match:
-        return None
+    headers = {
+        "Authorization": f"Bearer {AITUNNEL_API_KEY}",
+        "Content-Type": "application/json",
+    }
 
-    amount = int(match.group(1))
-    unit = match.group(2).lower()
-    reminder_text = match.group(3).strip()
+    system_prompt = f"""
+Ты парсер напоминаний для Telegram-бота.
 
-    if unit.startswith("мин"):
-        remind_at = datetime.utcnow() + timedelta(minutes=amount)
-        human_time = f"через {amount} мин."
+Текущая дата и время по Москве: {now_text}.
+Таймзона: Europe/Moscow.
 
-    elif unit.startswith("час"):
-        remind_at = datetime.utcnow() + timedelta(hours=amount)
-        human_time = f"через {amount} ч."
+Тебе нужно понять, является ли сообщение просьбой создать напоминание.
 
-    else:
-        return None
+Верни СТРОГО JSON без markdown и без пояснений.
 
-    return reminder_text, remind_at, human_time
+Формат ответа, если это напоминание:
+{{
+  "action": "create_reminder",
+  "text": "что именно напомнить",
+  "remind_at": "YYYY-MM-DD HH:MM",
+  "human_time": "человеческое описание времени"
+}}
+
+Формат ответа, если это НЕ напоминание:
+{{
+  "action": "none"
+}}
+
+Правила:
+- Понимай любые формулировки со словом "напомни", "напоминание", "поставь напоминание".
+- Порядок слов может быть любым.
+- Понимай такие варианты:
+  "напомни через 5 минут позвонить клиенту"
+  "через 5 минут напомни позвонить клиенту"
+  "бот, напомни Кате позвонить мне через 1 минуту"
+  "Кате напомни через час отправить договор"
+  "напомни завтра в 10:00 проверить ипотеку"
+  "завтра в 10 напомни проверить ипотеку"
+  "напомни в понедельник в 12:00 проверить задачу"
+  "напомни 25.06 в 15:00 отправить договор"
+- Понимай: через 5 минут, через 2 часа, через день, через неделю, сегодня, завтра, послезавтра, дни недели, даты формата 25.06 и 25.06.2026.
+- Если год не указан, используй ближайшую будущую дату.
+- Если указано "Кате", "Катерине", "Анюсе", включи это в текст напоминания.
+- Если время не указано вообще, верни action none.
+- Если дата/время уже прошли, выбери ближайшую будущую дату.
+- Не обещай ничего. Только JSON.
+
+Отправитель сообщения: {sender}.
+"""
+
+    payload = {
+        "model": MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+            {
+                "role": "user",
+                "content": user_text,
+            },
+        ],
+        "temperature": 0,
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=payload) as response:
+            data = await response.json()
+            raw = data["choices"][0]["message"]["content"]
+            cleaned = clean_json(raw)
+
+            try:
+                return json.loads(cleaned)
+            except Exception:
+                return {"action": "none"}
 
 
 async def ask_ai(message: str):
@@ -79,20 +147,32 @@ async def ask_ai(message: str):
             "content": """
 Ты KMillion Assistant.
 
-Ты ассистент агентства недвижимости.
+Ты универсальный личный и командный ассистент Анюси и Катерины.
 
-В команде два партнера:
-- Анюся
-- Катерина
+Ты можешь помогать с любыми бытовыми и рабочими задачами:
+- недвижимость
+- клиенты
+- контент
+- маркетинг
+- тексты
+- идеи
+- планирование
+- кино и книги
+- здоровье и самочувствие
+- обучение
+- бытовые вопросы
+- финансы на уровне общих объяснений
+- путешествия
+- технологии
+- любые повседневные вопросы
 
-Важно:
-Если пользователь просит напомнить, но пишет это обычным языком,
-бот сам создает напоминание, если фраза в формате:
-"напомни через 15 мин позвонить клиенту"
-или
-"напомни через 2 часа отправить договор".
-
-Отвечай кратко, понятно и по делу.
+Важные правила:
+- Не ограничивайся недвижимостью.
+- Если вопрос про здоровье, не ставь диагноз. Дай аккуратное объяснение, признаки риска и рекомендацию обратиться к врачу, если есть тревожные симптомы.
+- Если вопрос требует актуальных данных, например погода, курс валют, новости, свежие цены, честно скажи, что у тебя в Telegram-боте нет прямого доступа к интернету, если такая интеграция еще не подключена.
+- Не выдумывай факты.
+- Если пользователь просит напомнить, не просто обещай. Напоминания создает технический модуль бота. Если модуль не сработал, попроси указать точное время.
+- Отвечай понятно, живо и по делу.
 """
         }
     ]
@@ -124,9 +204,13 @@ async def ask_ai(message: str):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет! Я KMillion Assistant 🚀\n\n"
-        "Теперь можно писать так:\n"
-        "напомни через 15 мин позвонить Кате\n\n"
-        "Или старым способом:\n"
+        "Я универсальный ассистент: задачи, напоминания, тексты, идеи, быт, кино, здоровье, работа и не только.\n\n"
+        "Напоминания можно писать обычным языком:\n"
+        "• напомни через 15 минут позвонить клиенту\n"
+        "• через 1 минуту напомни мне отправить договор\n"
+        "• бот, напомни Кате через час отправить договор\n"
+        "• напомни завтра в 10:00 проверить ипотеку\n\n"
+        "Старый формат тоже работает:\n"
         "/remind 10 позвонить клиенту"
     )
 
@@ -167,11 +251,10 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remind_at = datetime.utcnow() + timedelta(minutes=minutes)
 
     sender = get_sender_name(user)
-    reminder_text = f"{sender}: {text}"
 
     add_reminder(
         chat_id=chat_id,
-        text=reminder_text,
+        text=f"{sender}: {text}",
         remind_at=remind_at.isoformat()
     )
 
@@ -204,43 +287,80 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
     text_lower = user_text.lower().strip()
+    sender = get_sender_name(user)
 
-    # 1. Сначала проверяем естественные напоминания
-    reminder = parse_natural_reminder(user_text)
-
-    if reminder:
-        reminder_text, remind_at, human_time = reminder
-
-        sender = get_sender_name(user)
-
-        add_reminder(
-            chat_id=chat_id,
-            text=f"{sender}: {reminder_text}",
-            remind_at=remind_at.isoformat()
-        )
-
-        await update.message.reply_text(
-            f"✅ Напоминание создано.\n\n"
-            f"{human_time}:\n"
-            f"{reminder_text}"
-        )
-
-        return
-
-    # 2. Потом обычный фильтр обращения к боту
-    trigger = (
-        text_lower.startswith("бот")
-        or text_lower.startswith("ассистент")
-    )
+    is_reply_to_bot = False
 
     if update.message.reply_to_message:
         if update.message.reply_to_message.from_user.id == context.bot.id:
-            trigger = True
+            is_reply_to_bot = True
+
+    has_reminder_word = (
+        "напомни" in text_lower
+        or "напоминание" in text_lower
+    )
+
+    trigger = (
+        text_lower.startswith("бот")
+        or text_lower.startswith("ассистент")
+        or has_reminder_word
+        or is_reply_to_bot
+    )
 
     if not trigger:
         return
 
-    sender = get_sender_name(user)
+    if has_reminder_word:
+        await update.message.chat.send_action("typing")
+
+        reminder_result = await analyze_reminder_with_ai(
+            user_text=user_text,
+            sender=sender
+        )
+
+        if reminder_result.get("action") == "create_reminder":
+            try:
+                remind_at_moscow = datetime.strptime(
+                    reminder_result["remind_at"],
+                    "%Y-%m-%d %H:%M"
+                ).replace(tzinfo=MOSCOW_TZ)
+
+                remind_at_utc = to_utc_naive(remind_at_moscow)
+
+                reminder_text = reminder_result["text"]
+                human_time = reminder_result.get(
+                    "human_time",
+                    remind_at_moscow.strftime("%d.%m.%Y в %H:%M по МСК")
+                )
+
+                add_reminder(
+                    chat_id=chat_id,
+                    text=f"{sender}: {reminder_text}",
+                    remind_at=remind_at_utc.isoformat()
+                )
+
+                await update.message.reply_text(
+                    f"✅ Напоминание создано.\n\n"
+                    f"{human_time}:\n"
+                    f"{reminder_text}"
+                )
+
+                return
+
+            except Exception as e:
+                await update.message.reply_text(
+                    f"Не смогла создать напоминание. Ошибка: {str(e)}"
+                )
+                return
+
+        await update.message.reply_text(
+            "Я поняла, что нужно напоминание, но не вижу точного времени.\n\n"
+            "Напиши, например:\n"
+            "напомни через 15 минут позвонить клиенту\n"
+            "или\n"
+            "напомни завтра в 10:00 проверить ипотеку"
+        )
+        return
 
     full_prompt = f"""
 Сообщение от: {sender}
