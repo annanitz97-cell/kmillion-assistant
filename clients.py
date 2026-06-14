@@ -7,9 +7,13 @@ cursor.execute("""
 CREATE TABLE IF NOT EXISTS clients (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT,
-    info TEXT,
-    created_by TEXT,
+    phone TEXT DEFAULT '',
+    budget TEXT DEFAULT '',
+    mortgage TEXT DEFAULT '',
+    location TEXT DEFAULT '',
     status TEXT DEFAULT 'active',
+    comment TEXT DEFAULT '',
+    created_by TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """)
@@ -17,10 +21,30 @@ CREATE TABLE IF NOT EXISTS clients (
 conn.commit()
 
 
-def add_client(name, info, created_by):
+def ensure_column(column_name, column_type):
+    cursor.execute("PRAGMA table_info(clients)")
+    columns = [row[1] for row in cursor.fetchall()]
+
+    if column_name not in columns:
+        cursor.execute(f"ALTER TABLE clients ADD COLUMN {column_name} {column_type}")
+        conn.commit()
+
+
+ensure_column("phone", "TEXT DEFAULT ''")
+ensure_column("budget", "TEXT DEFAULT ''")
+ensure_column("mortgage", "TEXT DEFAULT ''")
+ensure_column("location", "TEXT DEFAULT ''")
+ensure_column("comment", "TEXT DEFAULT ''")
+
+
+def add_client(name, phone="", budget="", mortgage="", location="", status="active", comment="", created_by=""):
     cursor.execute(
-        "INSERT INTO clients (name, info, created_by) VALUES (?, ?, ?)",
-        (name, info, created_by)
+        """
+        INSERT INTO clients
+        (name, phone, budget, mortgage, location, status, comment, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (name, phone, budget, mortgage, location, status, comment, created_by)
     )
     conn.commit()
 
@@ -28,7 +52,7 @@ def add_client(name, info, created_by):
 def get_clients():
     cursor.execute(
         """
-        SELECT id, name, info, created_by, status
+        SELECT id, name, phone, budget, mortgage, location, status, comment, created_by
         FROM clients
         WHERE status != 'archived'
         ORDER BY id DESC
@@ -38,44 +62,73 @@ def get_clients():
 
 
 def find_clients(query):
+    query = query.lower()
+
     cursor.execute(
         """
-        SELECT id, name, info, created_by, status
+        SELECT id, name, phone, budget, mortgage, location, status, comment, created_by
         FROM clients
         WHERE status != 'archived'
         AND (
             lower(name) LIKE ?
-            OR lower(info) LIKE ?
+            OR lower(phone) LIKE ?
+            OR lower(budget) LIKE ?
+            OR lower(mortgage) LIKE ?
+            OR lower(location) LIKE ?
             OR lower(status) LIKE ?
+            OR lower(comment) LIKE ?
         )
         ORDER BY id DESC
         """,
-        (f"%{query.lower()}%", f"%{query.lower()}%", f"%{query.lower()}%")
+        (
+            f"%{query}%",
+            f"%{query}%",
+            f"%{query}%",
+            f"%{query}%",
+            f"%{query}%",
+            f"%{query}%",
+            f"%{query}%"
+        )
     )
     return cursor.fetchall()
 
 
-def update_client(client_id, new_info):
+def get_client_by_id(client_id):
     cursor.execute(
         """
-        UPDATE clients
-        SET info = info || char(10) || ?
+        SELECT id, name, phone, budget, mortgage, location, status, comment, created_by
+        FROM clients
         WHERE id = ?
         """,
-        (new_info, client_id)
+        (client_id,)
     )
-    conn.commit()
+    return cursor.fetchone()
 
 
-def update_client_status(client_id, status):
+def update_client_fields(client_id, fields):
+    allowed = ["name", "phone", "budget", "mortgage", "location", "status", "comment"]
+    updates = []
+    values = []
+
+    for key, value in fields.items():
+        if key in allowed and value:
+            updates.append(f"{key} = ?")
+            values.append(value)
+
+    if not updates:
+        return
+
+    values.append(client_id)
+
     cursor.execute(
-        """
+        f"""
         UPDATE clients
-        SET status = ?
+        SET {", ".join(updates)}
         WHERE id = ?
         """,
-        (status, client_id)
+        values
     )
+
     conn.commit()
 
 
