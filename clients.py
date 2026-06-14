@@ -28,9 +28,9 @@ def add_client(name, info, created_by):
 def get_clients():
     cursor.execute(
         """
-        SELECT id, name, info, created_by
+        SELECT id, name, info, created_by, status
         FROM clients
-        WHERE status = 'active'
+        WHERE status != 'archived'
         ORDER BY id DESC
         """
     )
@@ -40,18 +40,43 @@ def get_clients():
 def find_clients(query):
     cursor.execute(
         """
-        SELECT id, name, info, created_by
+        SELECT id, name, info, created_by, status
         FROM clients
-        WHERE status = 'active'
+        WHERE status != 'archived'
         AND (
             lower(name) LIKE ?
             OR lower(info) LIKE ?
+            OR lower(status) LIKE ?
         )
         ORDER BY id DESC
         """,
-        (f"%{query.lower()}%", f"%{query.lower()}%")
+        (f"%{query.lower()}%", f"%{query.lower()}%", f"%{query.lower()}%")
     )
     return cursor.fetchall()
+
+
+def update_client(client_id, new_info):
+    cursor.execute(
+        """
+        UPDATE clients
+        SET info = info || char(10) || ?
+        WHERE id = ?
+        """,
+        (new_info, client_id)
+    )
+    conn.commit()
+
+
+def update_client_status(client_id, status):
+    cursor.execute(
+        """
+        UPDATE clients
+        SET status = ?
+        WHERE id = ?
+        """,
+        (status, client_id)
+    )
+    conn.commit()
 
 
 def archive_client(client_id):
